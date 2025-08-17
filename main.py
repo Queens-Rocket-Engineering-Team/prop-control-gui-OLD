@@ -183,6 +183,28 @@ class RedisTailer(QThread):
         self._stop_flag.set()
 
 # -----------------------------
+# API
+# -----------------------------
+class ApiPanel(QGroupBox):
+    def __init__(self, config: Config, parent=None):
+        super().__init__("API Endpoint", parent)
+        layout = QGridLayout()
+        self.api_base_edit = QLineEdit(config.api_base)
+        self.api_path_edit = QLineEdit(config.commands_path)
+        self.api_user_edit = QLineEdit(config.api_username)
+        self.api_pass_edit = QLineEdit(config.api_password)
+        self.api_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(QLabel("Base"), 0, 0)
+        layout.addWidget(self.api_base_edit, 0, 1)
+        layout.addWidget(QLabel("Path"), 1, 0)
+        layout.addWidget(self.api_path_edit, 1, 1)
+        layout.addWidget(QLabel("User"), 2, 0)
+        layout.addWidget(self.api_user_edit, 2, 1)
+        layout.addWidget(QLabel("Pass"), 3, 0)
+        layout.addWidget(self.api_pass_edit, 3, 1)
+        self.setLayout(layout)
+
+# -----------------------------
 # Controls
 # -----------------------------
 class ControlsPanel(QGroupBox):
@@ -197,7 +219,7 @@ class ControlsPanel(QGroupBox):
         self.btn_ctrl_close = QPushButton("CONTROL CLOSE")
         self.btn_gets = QPushButton("GETS")
         self.btn_stop = QPushButton("STOP")
-        self.stream_rate_edit = QLineEdit("10")
+        self.stream_rate_edit = QLineEdit("100")
         self.stream_rate_edit.setPlaceholderText("Hz")
         self.btn_stream = QPushButton("STREAM")
         self.btn_ping = QPushButton("Ping Backend")
@@ -214,6 +236,36 @@ class ControlsPanel(QGroupBox):
         layout.addWidget(self.btn_ping)
         self.setLayout(layout)
 
+# -----------------------------
+# Redis
+# -----------------------------
+class RedisPanel(QGroupBox):
+    def __init__(self, config: Config, parent=None):
+        super().__init__("Redis", parent)
+        layout = QGridLayout()
+        self.redis_host_edit = QLineEdit(config.redis_host)
+        self.redis_port_edit = QLineEdit(str(config.redis_port))
+        self.redis_chan_edit = QLineEdit(config.redis_channel)
+        self.redis_user_edit = QLineEdit(config.redis_username)
+        self.redis_pass_edit = QLineEdit(config.redis_password)
+        self.redis_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn_redis_start = QPushButton("Start Log Tail")
+        self.btn_redis_stop = QPushButton("Stop Log Tail")
+        self.btn_redis_stop.setEnabled(False)
+
+        layout.addWidget(QLabel("Host"), 0, 0)
+        layout.addWidget(self.redis_host_edit, 0, 1)
+        layout.addWidget(QLabel("Port"), 1, 0)
+        layout.addWidget(self.redis_port_edit, 1, 1)
+        layout.addWidget(QLabel("Channel"), 2, 0)
+        layout.addWidget(self.redis_chan_edit, 2, 1)
+        layout.addWidget(QLabel("User"), 3, 0)
+        layout.addWidget(self.redis_user_edit, 3, 1)
+        layout.addWidget(QLabel("Pass"), 4, 0)
+        layout.addWidget(self.redis_pass_edit, 4, 1)
+        layout.addWidget(self.btn_redis_start, 5, 0)
+        layout.addWidget(self.btn_redis_stop, 5, 1)
+        self.setLayout(layout)
 
 # -----------------------------
 # Dynamic graph panel using pyqtgraph
@@ -290,48 +342,31 @@ class MainWindow(QMainWindow):
         self._plot_timer.start()
 
 
-        api_box = QGroupBox("API Endpoint")
-        api_layout = QGridLayout()
-        self.api_base_edit = QLineEdit(self.config.api_base)
-        self.api_path_edit = QLineEdit(self.config.commands_path)
-        self.api_user_edit = QLineEdit(self.config.api_username)
-        self.api_pass_edit = QLineEdit(self.config.api_password)
-        self.api_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        api_layout.addWidget(QLabel("Base"), 0, 0)
-        api_layout.addWidget(self.api_base_edit, 0, 1)
-        api_layout.addWidget(QLabel("Path"), 1, 0)
-        api_layout.addWidget(self.api_path_edit, 1, 1)
-        api_layout.addWidget(QLabel("User"), 2, 0)
-        api_layout.addWidget(self.api_user_edit, 2, 1)
-        api_layout.addWidget(QLabel("Pass"), 3, 0)
-        api_layout.addWidget(self.api_pass_edit, 3, 1)
-        api_box.setLayout(api_layout)
+        # ----
+        # API
+        # ----
+        self.api_panel = ApiPanel(self.config)
+        self.api_base_edit = self.api_panel.api_base_edit
+        self.api_path_edit = self.api_panel.api_path_edit
+        self.api_user_edit = self.api_panel.api_user_edit
+        self.api_pass_edit = self.api_panel.api_pass_edit
 
-        redis_box = QGroupBox("Redis")
-        redis_layout = QGridLayout()
-        self.redis_host_edit = QLineEdit(self.config.redis_host)
-        self.redis_port_edit = QLineEdit(str(self.config.redis_port))
-        self.redis_chan_edit = QLineEdit(self.config.redis_channel)
-        self.redis_user_edit = QLineEdit(self.config.redis_username)
-        self.redis_pass_edit = QLineEdit(self.config.redis_password)
-        self.redis_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.btn_redis_start = QPushButton("Start Log Tail")
-        self.btn_redis_stop = QPushButton("Stop Log Tail")
-        self.btn_redis_stop.setEnabled(False)
-        redis_layout.addWidget(QLabel("Host"), 0, 0)
-        redis_layout.addWidget(self.redis_host_edit, 0, 1)
-        redis_layout.addWidget(QLabel("Port"), 1, 0)
-        redis_layout.addWidget(self.redis_port_edit, 1, 1)
-        redis_layout.addWidget(QLabel("Channel"), 2, 0)
-        redis_layout.addWidget(self.redis_chan_edit, 2, 1)
-        redis_layout.addWidget(QLabel("User"), 3, 0)
-        redis_layout.addWidget(self.redis_user_edit, 3, 1)
-        redis_layout.addWidget(QLabel("Pass"), 4, 0)
-        redis_layout.addWidget(self.redis_pass_edit, 4, 1)
-        redis_layout.addWidget(self.btn_redis_start, 5, 0)
-        redis_layout.addWidget(self.btn_redis_stop, 5, 1)
-        redis_box.setLayout(redis_layout)
 
+        # ----
+        # Redis
+        # ----
+        self.redis_panel = RedisPanel(self.config)
+        self.redis_host_edit = self.redis_panel.redis_host_edit
+        self.redis_port_edit = self.redis_panel.redis_port_edit
+        self.redis_chan_edit = self.redis_panel.redis_chan_edit
+        self.redis_user_edit = self.redis_panel.redis_user_edit
+        self.redis_pass_edit = self.redis_panel.redis_pass_edit
+        self.btn_redis_start = self.redis_panel.btn_redis_start
+        self.btn_redis_stop = self.redis_panel.btn_redis_stop
+
+        # ----
+        # Controls
+        # ----
         self.controls_panel = ControlsPanel()
         # Expose controls for signal connections
         self.control_combo = self.controls_panel.control_combo
@@ -367,8 +402,8 @@ class MainWindow(QMainWindow):
         # Left side: config panel
         side = QWidget()
         side_v = QVBoxLayout(side)
-        side_v.addWidget(api_box)
-        side_v.addWidget(redis_box)
+        side_v.addWidget(self.api_panel)
+        side_v.addWidget(self.redis_panel)
         side_v.addStretch(1)
         side.setMinimumWidth(360)
 
