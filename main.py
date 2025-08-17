@@ -182,6 +182,38 @@ class RedisTailer(QThread):
     def stop(self) -> None:
         self._stop_flag.set()
 
+# -----------------------------
+# Controls
+# -----------------------------
+class ControlsPanel(QGroupBox):
+    def __init__(self, parent=None):
+        super().__init__("Controls & Telemetry", parent)
+        layout = QHBoxLayout()
+        self.control_combo = QComboBox()
+        self.control_combo.addItems([
+            "AVFILL", "AVRUN", "AVDUMP", "AVPURGE1", "AVPURGE2", "AVVENT", "SAFE24", "IGN"
+        ])
+        self.btn_ctrl_open = QPushButton("CONTROL OPEN")
+        self.btn_ctrl_close = QPushButton("CONTROL CLOSE")
+        self.btn_gets = QPushButton("GETS")
+        self.btn_stop = QPushButton("STOP")
+        self.stream_rate_edit = QLineEdit("10")
+        self.stream_rate_edit.setPlaceholderText("Hz")
+        self.btn_stream = QPushButton("STREAM")
+        self.btn_ping = QPushButton("Ping Backend")
+
+        layout.addWidget(QLabel("Control"))
+        layout.addWidget(self.control_combo)
+        layout.addWidget(self.btn_ctrl_open)
+        layout.addWidget(self.btn_ctrl_close)
+        layout.addWidget(self.btn_gets)
+        layout.addWidget(self.btn_stop)
+        layout.addWidget(QLabel("Hz"))
+        layout.addWidget(self.stream_rate_edit)
+        layout.addWidget(self.btn_stream)
+        layout.addWidget(self.btn_ping)
+        self.setLayout(layout)
+
 
 # -----------------------------
 # Dynamic graph panel using pyqtgraph
@@ -300,29 +332,16 @@ class MainWindow(QMainWindow):
         redis_layout.addWidget(self.btn_redis_stop, 5, 1)
         redis_box.setLayout(redis_layout)
 
-        cmd_box = QGroupBox("Controls & Telemetry")
-        cmd_layout = QHBoxLayout()
-        self.control_combo = QComboBox()
-        self.control_combo.addItems(["AVFILL", "AVRUN", "AVDUMP", "AVPURGE1", "AVPURGE2", "AVVENT", "SAFE24", "IGN"])
-        self.btn_ctrl_open = QPushButton("CONTROL OPEN")
-        self.btn_ctrl_close = QPushButton("CONTROL CLOSE")
-        self.btn_gets = QPushButton("GETS")
-        self.btn_stop = QPushButton("STOP")
-        self.stream_rate_edit = QLineEdit("10")
-        self.stream_rate_edit.setPlaceholderText("Hz")
-        self.btn_stream = QPushButton("STREAM")
-        self.btn_ping = QPushButton("Ping Backend")
-        cmd_layout.addWidget(QLabel("Control"))
-        cmd_layout.addWidget(self.control_combo)
-        cmd_layout.addWidget(self.btn_ctrl_open)
-        cmd_layout.addWidget(self.btn_ctrl_close)
-        cmd_layout.addWidget(self.btn_gets)
-        cmd_layout.addWidget(self.btn_stop)
-        cmd_layout.addWidget(QLabel("Hz"))
-        cmd_layout.addWidget(self.stream_rate_edit)
-        cmd_layout.addWidget(self.btn_stream)
-        cmd_layout.addWidget(self.btn_ping)
-        cmd_box.setLayout(cmd_layout)
+        self.controls_panel = ControlsPanel()
+        # Expose controls for signal connections
+        self.control_combo = self.controls_panel.control_combo
+        self.btn_ctrl_open = self.controls_panel.btn_ctrl_open
+        self.btn_ctrl_close = self.controls_panel.btn_ctrl_close
+        self.btn_gets = self.controls_panel.btn_gets
+        self.btn_stop = self.controls_panel.btn_stop
+        self.stream_rate_edit = self.controls_panel.stream_rate_edit
+        self.btn_stream = self.controls_panel.btn_stream
+        self.btn_ping = self.controls_panel.btn_ping
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -342,7 +361,7 @@ class MainWindow(QMainWindow):
 
         right_container = QWidget()
         right_v = QVBoxLayout(right_container)
-        right_v.addWidget(cmd_box)
+        right_v.addWidget(self.controls_panel)
         right_v.addWidget(right_splitter, 1)
 
         # Left side: config panel
