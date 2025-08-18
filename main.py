@@ -345,25 +345,59 @@ class GraphPanel(QWidget):
         super().__init__(parent)
         self.columns = 1  # Force single column
         self.max_points = max_points
+        self.window_seconds = 30  # Sliding window of 30 seconds
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setHorizontalSpacing(8)
-        self.grid.setVerticalSpacing(8)
+        self.grid.setVerticalSpacing(16)
         self._order = []
         self._curves = {}
         self._data = {}
         self._last_t = {}  # track last timestamp per series to avoid duplicates
+        self._readouts = {}  # name -> QLabel
+        self._titles = {}    # name -> QLabel
 
     def ensure_plot(self, name: str):
         if name in self._curves:
             return self._curves[name]
         row = len(self._order)
-        col = 0  # Always column 0 for vertical stacking
+
+        # Vertical box for title and readout
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(2)
+
+        # Title label
+        title = QLabel(name)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = title.font()
+        font.setPointSize(11)
+        font.setBold(True)
+        title.setFont(font)
+        left_layout.addWidget(title)
+
+        # Live readout label
+        readout = QLabel("--")
+        readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = readout.font()
+        font.setPointSize(14)
+        font.setBold(True)
+        readout.setFont(font)
+        left_layout.addWidget(readout)
+        left_layout.addStretch(1)
+
+        self._readouts[name] = readout
+        self._titles[name] = title
+
+        # Plot widget to the right of the readout
         plot = pg.PlotWidget()
-        plot.setTitle(name)
         plot.showGrid(x=True, y=True)
         curve = plot.plot()
-        self.grid.addWidget(plot, row, col)
+
+        # Place left_widget and plot in the same row
+        self.grid.addWidget(left_widget, row, 0, alignment=Qt.AlignmentFlag.AlignTop)
+        self.grid.addWidget(plot, row, 1)
         self._order.append(name)
         self._curves[name] = curve
         self._data[name] = ([], [])
@@ -382,18 +416,28 @@ class GraphPanel(QWidget):
         xs, ys = self._data[name]
         xs.append(t)
         ys.append(y)
+
+        # Sliding window: keep only points within the last window_seconds
+        min_t = t - self.window_seconds
+        while xs and xs[0] < min_t:
+            xs.pop(0)
+            ys.pop(0)
+
         if len(xs) > self.max_points:
             drop = len(xs) - self.max_points
             del xs[:drop]
             del ys[:drop]
         curve.setData(xs, ys)
 
+        # Update live readout
+        if name in self._readouts:
+            self._readouts[name].setText(f"{y:.3f}")
+
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
         self.setWindowTitle("Prop Control")
-        self.showMaximized()
 
         self.thread_pool = QThreadPool.globalInstance()
         # Avoid saturating the machine with too many concurrent requests
@@ -797,7 +841,7 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     win = MainWindow(CONFIG)
-    win.show()
+    win.showMaximized()
     return app.exec()
 
 
