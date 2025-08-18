@@ -251,6 +251,17 @@ class ControlsSidebar(QGroupBox):
             h.addWidget(btn_close)
             box.setLayout(h)
             valves_layout.addWidget(box)
+
+        # Add "Close All" and "Default Positions" buttons
+        btn_close_all = QPushButton("Close All", valves_box)
+        btn_default_positions = QPushButton("Default Positions", valves_box)
+        valves_layout.addWidget(btn_close_all)
+        valves_layout.addWidget(btn_default_positions)
+
+        # Connect buttons to signals
+        btn_close_all.clicked.connect(lambda: [self.controlRequested.emit(name, "CLOSE") for name in av_controls])
+        btn_default_positions.clicked.connect(lambda: self.controlRequested.emit("ALL", "DEFAULT"))
+
         valves_layout.addStretch(1)
         valves_box.setLayout(valves_layout)
         v.addWidget(valves_box)
@@ -366,7 +377,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.setWindowTitle("Prop Control")
-        self.resize(1000, 700)
+        self.showMaximized()
 
         self.thread_pool = QThreadPool.globalInstance()
         # Avoid saturating the machine with too many concurrent requests
@@ -623,9 +634,28 @@ class MainWindow(QMainWindow):
 
     def send_control_command(self, name: str, action: str) -> None:
         name = name.strip()
-        if action not in {"OPEN", "CLOSE"}:
+        if action not in {"OPEN", "CLOSE", "DEFAULT"}:
             QMessageBox.warning(self, "Command", f"Unknown action: {action}")
             return
+
+        if (name, action) == ("ALL", "DEFAULT"):
+            # Set each valve to its default state from deviceConfig
+            if not isinstance(self.deviceConfig, dict):
+                return
+            for devName, devDict in self.deviceConfig.get("configs", {}).items():
+                for control, controlDict in devDict.get("controls", {}).items():
+                    control_upper = control.upper()
+                    defaultState = controlDict.get("defaultState", None)
+                    if defaultState in {"OPEN", "CLOSED"}:
+                        if defaultState == "OPEN":
+                            action = "OPEN"
+                        elif defaultState == "CLOSED":
+                            action = "CLOSE"
+                        else:
+                            continue
+                        self.send_control_command(control_upper, action)
+            return
+
         self.send_command({"command": "CONTROL", "args": [name, action]})
 
     def on_gets(self) -> None:
