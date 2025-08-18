@@ -260,7 +260,7 @@ class ControlsSidebar(QGroupBox):
 
         # Connect buttons to signals
         btn_close_all.clicked.connect(lambda: [self.controlRequested.emit(name, "CLOSE") for name in av_controls])
-        btn_default_positions.clicked.connect(lambda: self.controlRequested.emit("ALL", "DEFAULT"))
+        btn_default_positions.clicked.connect(self.handleDefaultButton)
 
         valves_layout.addStretch(1)
         valves_box.setLayout(valves_layout)
@@ -296,6 +296,22 @@ class ControlsSidebar(QGroupBox):
             general_layout.addWidget(general_widget)
         general_box.setLayout(general_layout)
         v.addWidget(general_box)
+
+    def handleDefaultButton(self):
+        # Open a dialog to confirm whether the user wants to reset to default. Warn that this will dump any oxidizer to
+        # the air
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Reset",
+            "This will reset all controls to their default positions and may dump oxidizer to the air. Do you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.controlRequested.emit("ALL", "DEFAULT")
+        else:
+            return
+
 
 # -----------------------------
 # Credentials dialog (username + password)
