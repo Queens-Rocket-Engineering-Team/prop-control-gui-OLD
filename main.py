@@ -17,6 +17,10 @@ import re
 from math import isfinite
 from dataclasses import dataclass
 from typing import Any, Optional
+from pathlib import Path
+from datetime import datetime
+import csv
+import os
 
 import httpx
 import pyqtgraph as pg
@@ -350,41 +354,54 @@ class GraphPanel(QWidget):
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setHorizontalSpacing(8)
         self.grid.setVerticalSpacing(16)
-        self._order = []
-        self._curves = {}
-        self._data = {}
-        self._last_t = {}  # track last timestamp per series to avoid duplicates
-        self._readouts = {}  # name -> QLabel
-        self._titles = {}    # name -> QLabel
+        self._order: list[str] = []
+        self._curves: dict[str, pg.PlotDataItem] = {}
+        self._plots: dict[str, pg.PlotWidget] = {}
+        self._data: dict[str, tuple[list[float], list[float]]] = {}
+        self._last_t: dict[str, float] = {}  # track last timestamp per series to avoid duplicates
+        self._readouts: dict[str, QLabel] = {}  # name -> QLabel
+        self._titles: dict[str, QLabel] = {}    # name -> QLabel
+        self._units: dict[str, str] = {}  # key: full series or base name -> unit
+        # Display-only tare offsets per series; raw data in _data remains unchanged
+        self._tare_offsets: dict[str, float] = {}
 
-    def ensure_plot(self, name: str):
+    def ensure_plot(self, name: str) -> pg.PlotDataItem:
         if name in self._curves:
             return self._curves[name]
         row = len(self._order)
 
-        # Vertical box for title and readout
+        # Vertical box for title, readout, and tare button
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
 
-        # Title label
-        title = QLabel(name)
+        # Title label (include unit if known)
+        base_name = name.split(":", 1)[-1]
+        unit = self._units.get(name) or self._units.get(base_name)
+        title_text = f"{name} ({unit})" if unit else name
+        title = QLabel(title_text)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = title.font()
-        font.setPointSize(11)
-        font.setBold(True)
-        title.setFont(font)
+        tfont = title.font()
+        tfont.setPointSize(11)
+        tfont.setBold(True)
+        title.setFont(tfont)
         left_layout.addWidget(title)
 
         # Live readout label
         readout = QLabel("--")
         readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = readout.font()
-        font.setPointSize(14)
-        font.setBold(True)
-        readout.setFont(font)
+        rfont = readout.font()
+        rfont.setPointSize(14)
+        rfont.setBold(True)
+        readout.setFont(rfont)
         left_layout.addWidget(readout)
+
+        # Per-series Tare button (display-only offset)
+        tare_btn = QPushButton("Tare")
+        tare_btn.setToolTip("Zero this series by subtracting the current value from the display")
+        tare_btn.clicked.connect(lambda _=False, n=name: self.tare_series(n))
+        left_layout.addWidget(tare_btn)
         left_layout.addStretch(1)
 
         self._readouts[name] = readout
@@ -400,8 +417,28 @@ class GraphPanel(QWidget):
         self.grid.addWidget(plot, row, 1)
         self._order.append(name)
         self._curves[name] = curve
+        self._plots[name] = plot
         self._data[name] = ([], [])
         return curve
+
+    def set_unit(self, name: str, unit: str) -> None:
+        """Register a unit for a series or base signal name.
+        name can be either 'DEVICE:signal' or just 'signal'."""
+        if not name:
+            return
+        unit = (unit or "").strip()
+        if not unit:
+            return
+        self._units[name] = unit
+        # Also map base for convenience
+        if ":" in name:
+            base = name.split(":", 1)[-1]
+            self._units.setdefault(base, unit)
+        # Refresh existing titles
+        for series_name, title_lbl in self._titles.items():
+            base = series_name.split(":", 1)[-1]
+            u = self._units.get(series_name) or self._units.get(base)
+            title_lbl.setText(f"{series_name} ({u})" if u else series_name)
 
     def add_point(self, name: str, t: float, y: float) -> None:
         if not name:
@@ -428,11 +465,173 @@ class GraphPanel(QWidget):
         else:
             start_idx = len(xs)  # all points are older
 
-        curve.setData(xs[start_idx:], ys[start_idx:])
+        if start_idx > 0:
+            del xs[:start_idx]
+            del ys[:start_idx]
 
-        # Update live readout
+        plot_xs = xs[:]
+        plot_ys = ys[:]
+
+        # Apply display-only tare offset if present
+        offset = self._tare_offsets.get(name, 0.0)
+        if offset:
+            plot_ys = [v - offset for v in plot_ys]
+
+        # Pad the window if not enough data to fill window_seconds
+        if plot_xs:
+            window_start = plot_xs[0]
+            window_end = plot_xs[-1]
+            # If less than window_seconds, pad at the left
+            if window_end - window_start < self.window_seconds:
+                pad_start = window_end - self.window_seconds
+                if pad_start < 0:
+                    pad_start = 0
+                # If first point is after pad_start, pad with NaN
+                if plot_xs[0] > pad_start:
+                    plot_xs = [pad_start] + plot_xs
+                    plot_ys = [float('nan')] + plot_ys
+            # Always set x range to window_end - window_seconds to window_end
+            plot_widget = self._plots.get(name)
+            if plot_widget is not None:
+                plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
+                view_box = getattr(plot_item, "getViewBox", lambda: None)()
+                if view_box is not None:
+                    view_box.setXRange(window_end - self.window_seconds, window_end)
+        else:
+            # No data yet, set x range to t - window_seconds to t
+            plot_widget = self._plots.get(name)
+            if plot_widget is not None:
+                plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
+                view_box = getattr(plot_item, "getViewBox", lambda: None)()
+                if view_box is not None:
+                    view_box.setXRange(t - self.window_seconds, t)
+
+        curve.setData(plot_xs, plot_ys)
+
+        # Update live readout (append unit if available)
         if name in self._readouts:
-            self._readouts[name].setText(f"{y:.3f}")
+            unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
+            disp_y = y - self._tare_offsets.get(name, 0.0)
+            self._readouts[name].setText(f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}")
+
+    def tare_series(self, name: str) -> None:
+        """Set a display-only zero offset for a series to its current value and refresh the plot."""
+        if name not in self._data:
+            return
+        xs, ys = self._data[name]
+        if not ys:
+            return  # nothing to tare yet
+        current = ys[-1]
+        self._tare_offsets[name] = float(current)
+        # Refresh existing curve with new offset and update readout
+        self._refresh_series(name)
+
+    def _refresh_series(self, name: str) -> None:
+        """Re-render a series using the current tare offset and window."""
+        if name not in self._data:
+            return
+        xs, ys = self._data[name]
+        if not xs:
+            # Clear plot and readout
+            curve = self._curves.get(name)
+            if curve is not None:
+                curve.setData([], [])
+            if name in self._readouts:
+                self._readouts[name].setText("--")
+            return
+
+        # Use last timestamp to compute window
+        t = xs[-1]
+        min_t = t - self.window_seconds
+        start_idx = 0
+        for i, tx in enumerate(xs):
+            if tx >= min_t:
+                start_idx = i
+                break
+        else:
+            start_idx = len(xs)
+
+        plot_xs = xs[start_idx:]
+        plot_ys = ys[start_idx:]
+
+        offset = self._tare_offsets.get(name, 0.0)
+        if offset:
+            plot_ys = [v - offset for v in plot_ys]
+
+        if plot_xs:
+            window_start = plot_xs[0]
+            window_end = plot_xs[-1]
+            if window_end - window_start < self.window_seconds:
+                pad_start = window_end - self.window_seconds
+                if pad_start < 0:
+                    pad_start = 0
+                if plot_xs[0] > pad_start:
+                    plot_xs = [pad_start] + plot_xs
+                    plot_ys = [float('nan')] + plot_ys
+            plot_widget = self._plots.get(name)
+            if plot_widget is not None:
+                plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
+                view_box = getattr(plot_item, "getViewBox", lambda: None)()
+                if view_box is not None:
+                    view_box.setXRange(window_end - self.window_seconds, window_end)
+        curve = self._curves.get(name)
+        if curve is not None:
+            curve.setData(plot_xs, plot_ys)
+        # Update readout with offset applied
+        if name in self._readouts and ys:
+            unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
+            disp_y = ys[-1] - self._tare_offsets.get(name, 0.0)
+            self._readouts[name].setText(f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}")
+
+class DataLogger(QObject):
+    """Buffered CSV logger; flushes periodically."""
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._file = None
+        self._writer = None
+        self._buffer: list[tuple[str, float, str, float]] = []
+        self.path: Optional[Path] = None
+
+    @property
+    def is_active(self) -> bool:
+        return self._file is not None
+
+    def start(self, base_dir: Path, start_dt: datetime) -> None:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        # "PANDA-TEST-DDMMYY-HHMMSS" (with .csv extension)
+        fname = f"PANDA-TEST-{start_dt.strftime('%d%m%y-%H%M%S')}.csv"
+        self.path = base_dir / fname
+        self._file = open(self.path, "w", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(["device", "t", "name", "value"])  # header
+        self._file.flush()
+
+    def log(self, device: str, t: float, name: str, value: float) -> None:
+        if not self._writer:
+            return
+        self._buffer.append((device, t, name, value))
+        # Safety: if buffer grows a lot, flush early
+        if len(self._buffer) >= 200:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._writer and self._buffer:
+            self._writer.writerows(self._buffer)
+            self._buffer.clear()
+            # lightweight flush; no fsync to avoid disk hammering
+            if self._file:
+                self._file.flush()
+
+    def stop(self) -> None:
+        try:
+            self.flush()
+        finally:
+            if self._file:
+                self._file.close()
+            self._file = None
+            self._writer = None
+            self.path = None
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config: Config):
@@ -442,10 +641,6 @@ class MainWindow(QMainWindow):
 
         self.thread_pool = QThreadPool.globalInstance()
         # Avoid saturating the machine with too many concurrent requests
-        try:
-            self.thread_pool.setMaxThreadCount(4)
-        except Exception:
-            pass
         self._http_workers: set[HttpRequestWorker] = set()  # keep refs to prevent GC/segfaults
         self.redis_thread: Optional[RedisTailer] = None
 
@@ -476,6 +671,24 @@ class MainWindow(QMainWindow):
         act_creds.triggered.connect(self.set_api_credentials)
         server_menu.addAction(act_creds)
 
+        # --- Logging setup ---
+        self._log_dir = Path(__file__).resolve().parent / "data"
+        self._test_start_dt: Optional[datetime] = None
+        self.logger = DataLogger(self)
+
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(1000)  # flush once per second
+        self._log_timer.timeout.connect(self.logger.flush)
+
+        # ----
+        # View menu: Show Log toggle
+        # ----
+        view_menu = self.menuBar().addMenu("View")
+        self.act_show_log = QAction("Show Log", self, checkable=True)
+        self.act_show_log.setChecked(True)
+        view_menu.addAction(self.act_show_log)
+
+
         # ----
         # Controls (moved into sidebar General group)
         # ----
@@ -488,6 +701,10 @@ class MainWindow(QMainWindow):
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+
+        self.act_show_log.toggled.connect(self.toggle_log)
+        # Ensure log is visible by default
+        self.log.setVisible(True)
 
         # --- Right side: graphs + log (controls moved to sidebar)
         self.graphs = GraphPanel(columns=2)
@@ -589,6 +806,9 @@ class MainWindow(QMainWindow):
             self.graphs.add_point(series, t, val)
         self._pending_points.clear()
 
+    def toggle_log(self):
+        self.log.setVisible(self.act_show_log.isChecked())
+
     @Slot()
     def on_ping(self) -> None:
         base, auth = self._base_and_auth()
@@ -627,9 +847,46 @@ class MainWindow(QMainWindow):
 
             # WE NO LONGER SET TO DEFAULT ON BOOT. Button states are set by status requests using send_status_request()
             # self.setControlButtonsToDefault()
+            # Apply any units from the config to graph titles/readouts
+            self.apply_units_from_config()
 
         except Exception as e:
             self.append_log(f"Failed to parse config: {e}")
+
+    def apply_units_from_config(self) -> None:
+        """Extract units from the loaded deviceConfig and register them with the graphs.
+        Tries a few common shapes:
+          configs -> device -> (sensors|telemetry|signals|readings|measurements) -> name -> { unit|units|uom }
+          configs -> device -> units{ name: unit }
+        """
+        cfg = self.deviceConfig
+        if not isinstance(cfg, dict):
+            return
+        container = cfg.get("configs", cfg)
+        if not isinstance(container, dict):
+            return
+        for dev, devDict in container.items():
+            if not isinstance(devDict, dict):
+                continue
+            # Direct units map
+            direct_units = devDict.get("units") or devDict.get("units_map")
+            if isinstance(direct_units, dict):
+                for sig, unit in direct_units.items():
+                    if isinstance(sig, str) and isinstance(unit, str) and unit.strip():
+                        self.graphs.set_unit(f"{dev}:{sig}", unit.strip())
+                        self.graphs.set_unit(sig, unit.strip())
+            # Nested collections
+            for key in ("sensors", "telemetry", "signals", "readings", "measurements"):
+                coll = devDict.get(key)
+                if not isinstance(coll, dict):
+                    continue
+                for sig, meta in coll.items():
+                    unit_val: Optional[str] = None
+                    if isinstance(meta, dict):
+                        unit_val = meta.get("unit") or meta.get("units") or meta.get("uom")
+                    if isinstance(unit_val, str) and unit_val.strip():
+                        self.graphs.set_unit(f"{dev}:{sig}", unit_val.strip())
+                        self.graphs.set_unit(sig, unit_val.strip())
 
     def send_config_request(self) -> None:
         base, auth = self._base_and_auth()
@@ -737,10 +994,24 @@ class MainWindow(QMainWindow):
         self.stream_rate_edit.setEnabled(False)
         self.btn_stream.setEnabled(False)
 
+        if not self.logger.is_active:
+            self._test_start_dt = datetime.now()
+            self.logger.start(self._log_dir, self._test_start_dt)
+            self._log_timer.start()
+            self.append_log(f"Logging to {self.logger.path}")
+
     def on_stop(self) -> None:
         self.send_command({"command": "STOP", "args": []})
         self.btn_stream.setEnabled(True)
         self.stream_rate_edit.setEnabled(True)
+
+        # Stop logging
+        if self.logger.is_active:
+            self._log_timer.stop()
+            p = self.logger.path  # keep for message before stop()
+            self.logger.stop()
+            if p:
+                self.append_log(f"Log saved: {p}")
 
     def on_redis_message(self, m: str) -> None:
         m = m.split("]", 1)[-1]  # strip any leading timestamp
@@ -785,6 +1056,9 @@ class MainWindow(QMainWindow):
         series = f"{device}:{name}"
         self._pending_points.append((series, t, val))
 
+        if self.logger.is_active:
+            self.logger.log(device, t, name, val)
+
     def handleControlString(self, data: re.Match) -> None:
         # device not used here, but parsed for completeness
         _device = data.group("device")
@@ -822,6 +1096,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         try:
             self.stop_redis()
+            if self.logger.is_active:
+                self._log_timer.stop()
+                self.logger.stop()
         finally:
             super().closeEvent(event)
 
