@@ -20,7 +20,6 @@ from typing import Any, Optional
 from pathlib import Path
 from datetime import datetime
 import csv
-import os
 
 import httpx
 import pyqtgraph as pg
@@ -584,46 +583,109 @@ class GraphPanel(QWidget):
             self._readouts[name].setText(f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}")
 
 class DataLogger(QObject):
-    """Buffered CSV logger; flushes periodically."""
+    """Buffered wide-CSV logger with per-device row assembly and periodic flushes.
+
+    CSV layout: device,t,<sensor1>,<sensor2>,...
+    """
+
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._file = None
         self._writer = None
-        self._buffer: list[tuple[str, float, str, float]] = []
-        self.path: Optional[Path] = None
+        self._buffer = []  # list of ready-to-write rows
+        self.path = None
+        self._columns = []  # sensor names
+        self._header_written = False
+        # Current in-progress rows per device
+        self._current_t = {}
+        self._current_row = {}
 
     @property
     def is_active(self) -> bool:
         return self._file is not None
 
-    def start(self, base_dir: Path, start_dt: datetime) -> None:
+    def start(self, base_dir: Path, start_dt: datetime, columns: Optional[list[str]] = None) -> None:
         base_dir.mkdir(parents=True, exist_ok=True)
-        # "PANDA-TEST-DDMMYY-HHMMSS" (with .csv extension)
         fname = f"PANDA-TEST-{start_dt.strftime('%d%m%y-%H%M%S')}.csv"
         self.path = base_dir / fname
         self._file = open(self.path, "w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
-        self._writer.writerow(["device", "t", "name", "value"])  # header
-        self._file.flush()
+        # Prepare columns, may be empty; if empty, defer header until first data row
+        self._columns = sorted(set(columns or []))
+        if self._columns:
+            header = ["device", "t", *self._columns]
+            self._writer.writerow(header)
+            self._file.flush()
+            self._header_written = True
+        else:
+            self._header_written = False
+        # Reset per-device accumulators
+        self._current_t.clear()
+        self._current_row.clear()
 
     def log(self, device: str, t: float, name: str, value: float) -> None:
         if not self._writer:
             return
-        self._buffer.append((device, t, name, value))
-        # Safety: if buffer grows a lot, flush early
+    # Always record incoming sensor values; columns are handled at finalize time
+        prev_t = self._current_t.get(device)
+        if prev_t is None:
+            self._current_t[device] = t
+            self._current_row[device] = {}
+        elif t != prev_t:
+            # new timestamp -> finalize previous row first
+            self._finalize_device_row(device)
+            self._current_t[device] = t
+            self._current_row[device] = {}
+        # record value
+        self._current_row[device][name] = value
+        # protect against runaway memory
         if len(self._buffer) >= 200:
             self.flush()
 
     def flush(self) -> None:
-        if self._writer and self._buffer:
+        if not self._writer:
+            return
+        # finalize in-progress rows (so far) and write out
+        for device, rowdict in list(self._current_row.items()):
+            if rowdict:
+                self._finalize_device_row(device)
+                # keep the same timestamp active, but clear row accumulation
+                self._current_row[device] = {}
+        if self._buffer:
             self._writer.writerows(self._buffer)
             self._buffer.clear()
-            # lightweight flush; no fsync to avoid disk hammering
             if self._file:
                 self._file.flush()
 
+    def _finalize_device_row(self, device: str) -> None:
+        if device not in self._current_t or device not in self._current_row:
+            return
+        t = self._current_t[device]
+        rowdict = self._current_row[device]
+        if not rowdict:
+            return
+        # Write header if still pending
+        if not self._header_written:
+            if not self._columns:
+                self._columns = sorted(rowdict.keys())
+            header = ["device", "t", *self._columns]
+            if not self._writer:
+                return
+            self._writer.writerow(header)
+            if self._file:
+                self._file.flush()
+            self._header_written = True
+        # Build row in fixed column order
+        row = [device, t]
+        for col in self._columns:
+            row.append(rowdict.get(col, ""))
+        self._buffer.append(row)
+
     def stop(self) -> None:
         try:
+            # finalize remaining
+            for device in list(self._current_t.keys()):
+                self._finalize_device_row(device)
             self.flush()
         finally:
             if self._file:
@@ -631,6 +693,9 @@ class DataLogger(QObject):
             self._file = None
             self._writer = None
             self.path = None
+            self._columns = []
+            self._current_t.clear()
+            self._current_row.clear()
 
 
 class MainWindow(QMainWindow):
@@ -755,6 +820,26 @@ class MainWindow(QMainWindow):
         self.send_config_request()
         self.send_status_request()
         self.statusBar().showMessage("Ready")
+
+    def _collect_sensor_columns(self) -> list[str]:
+        """Collect sensor names from deviceConfig for CSV header order.
+        Searches common keys per device: sensors, telemetry, signals, readings, measurements.
+        Returns sorted unique sensor names (without device prefix)."""
+        names: set[str] = set()
+        cfg = self.deviceConfig
+        if isinstance(cfg, dict):
+            container = cfg.get("configs", cfg)
+            if isinstance(container, dict):
+                for _dev, devDict in container.items():
+                    if not isinstance(devDict, dict):
+                        continue
+                    for key in ("sensors", "telemetry", "signals", "readings", "measurements"):
+                        coll = devDict.get(key)
+                        if isinstance(coll, dict):
+                            for sig in coll.keys():
+                                if isinstance(sig, str) and sig:
+                                    names.add(sig)
+        return sorted(names)
 
     def build_url(self) -> str:
         base, _ = self._base_and_auth()
@@ -996,7 +1081,8 @@ class MainWindow(QMainWindow):
 
         if not self.logger.is_active:
             self._test_start_dt = datetime.now()
-            self.logger.start(self._log_dir, self._test_start_dt)
+            columns = self._collect_sensor_columns()
+            self.logger.start(self._log_dir, self._test_start_dt, columns=columns)
             self._log_timer.start()
             self.append_log(f"Logging to {self.logger.path}")
 
