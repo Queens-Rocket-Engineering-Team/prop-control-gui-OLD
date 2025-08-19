@@ -11,9 +11,11 @@ Adjust API_BASE and REDIS settings below.
 from __future__ import annotations
 
 import json
+import serial
 import sys
 import threading
 import re
+import time
 from math import isfinite
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -183,6 +185,25 @@ class RedisTailer(QThread):
     def stop(self) -> None:
         self._stop_flag.set()
 
+
+class keySwitchMonitor(QThread):
+    statusSig = Signal(int)
+    messageSig = Signal(str)
+
+    def __init__(self, port:str):
+        super().__init__()
+        self.status: int | None = None # Open is 0, 1 is closed
+        self.espSerial = serial.Serial(port)
+
+    def run(self):
+        while True:
+            line = self.espSerial.readline(3).strip()
+            stat = int(line)
+
+            if stat != self.status and stat in [0, 1]:
+                self.status = stat
+                self.statusSig.emit(self.status)
+
 # -----------------------------
 # Controls
 # -----------------------------
@@ -234,7 +255,7 @@ class ControlsSidebar(QGroupBox):
             av_controls = [c for c in controls if c.startswith("AV")]
             power_controls = [c for c in controls if c in {"SAFE24", "IGN"}]
 
-        self.controlButtons = {}
+        self.controlButtons: dict[str, QPushButton] = {}
 
         v = QVBoxLayout(self)
 
@@ -816,10 +837,35 @@ class MainWindow(QMainWindow):
         self.btn_stream.clicked.connect(self.on_stream)
         self.btn_stop.clicked.connect(self.on_stop)
 
+        # Keyswitch setup
+        self.keySwitchMonitor = keySwitchMonitor("COM3")
+        self.keySwitchMonitor.statusSig.connect(self.handleKeySwitch)
+        self.keySwitchMonitor.messageSig.connect(lambda msg: self.append_log(msg))
+        self.keySwitchMonitor.start()
+        self.append_log(f"KEY SWITCH STATUS {str(self.keySwitchMonitor.status)}")
+
+        # Server setup
         self.set_server_ip(self.default_server_ip)
         self.send_config_request()
         self.send_status_request()
         self.statusBar().showMessage("Ready")
+
+    def handleKeySwitch(self, status: int):
+        self.append_log(f"Keyswitch changed to {status} position")
+        for buttonName in self.controlButtons:
+            self.append_log(f"checking {buttonName}")
+            if buttonName in ["SAFE24_open", "SAFE24_close",
+                               "IGN_open", "IGN_close",
+                               "AVFILL_open", "AVFILL_close",
+                                "AVRUN_open", "AVRUN_close"]:
+                if status == 1:
+                    self.append_log(f"Enabling {buttonName}")
+                    self.controlButtons[f"{buttonName}"].setEnabled(True)
+                    self.controlButtons[f"{buttonName}"].setEnabled(True)
+                else:
+                    self.append_log(f"Disabling {buttonName}")
+                    self.controlButtons[f"{buttonName}"].setEnabled(False)
+                    self.controlButtons[f"{buttonName}"].setEnabled(False)
 
     def _collect_sensor_columns(self) -> list[str]:
         """Collect sensor names from deviceConfig for CSV header order.
@@ -903,6 +949,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(lambda payload: self.append_log(f"Ping OK: {payload}"))
         worker.signals.error.connect(lambda msg: self.append_log(f"Ping ERROR: {msg}"))
         self.thread_pool.start(worker)
+
 
 
     def setControlButtonsToDefault(self) -> None:
