@@ -110,3 +110,7 @@ button:active {
   margin-top: 2pt;
   margin-bottom: 2pt;
 }
+
+.camera_control {
+  text-align: center;
+}
