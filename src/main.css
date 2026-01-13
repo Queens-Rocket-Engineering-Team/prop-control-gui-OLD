@@ -164,3 +164,7 @@ button:active {
   text-align: right;
   float: right;
 }
+
+#menu-button {
+  cursor: pointer;
+}

@@ -5,9 +5,8 @@ use std::sync::Mutex;
 static IP_ADDRESS: Mutex<String> = Mutex::new(String::new());
 
 #[tauri::command]
-//dummy function to fetch server health
-//currently, returns the current ip address
-async fn fetch_server_health() -> String {
+// returns the current ip address
+async fn fetch_server_ip() -> String {
     let gaurded_ip = IP_ADDRESS.lock().unwrap();
     gaurded_ip.to_string()
 }
@@ -17,6 +16,7 @@ async fn fetch_server_health() -> String {
 //stores the inputted string in IP_ADDRESS for later use
 async fn submit_ip(new_ip: String) {
     let mut gaurded_ip = IP_ADDRESS.lock().unwrap();
+    println!("New IP Submitted: {}", new_ip);
     *gaurded_ip = String::from(new_ip);
 }
 
@@ -24,7 +24,7 @@ async fn submit_ip(new_ip: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![fetch_server_health, submit_ip])
+        .invoke_handler(tauri::generate_handler![fetch_server_ip, submit_ip])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

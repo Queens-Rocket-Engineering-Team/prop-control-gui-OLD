@@ -33,27 +33,11 @@ function collapseNavbar() {
   }
 }
 
-const ip_address = ref("");
-const server_status = ref("");
-async function fetchServerHealth() {
-  invoke("fetch_server_health")
-    .then((status) => {
-      server_status.value = status;
-    })
-    .catch((error) => {
-      server_status.value = "Error fetching server health:" + error;
-      console.error("Error fetching server health:", error);
-    });
+const server_ip = ref("");
+function get_ip(new_ip) {
+  console.log("Received new IP from server bar:", new_ip);
+  server_ip.value = new_ip;
 }
-//sends the entered ip address to the backend
-async function submitIP(ip){
-  invoke("submit_ip", {newIp: ip});
-}
-
-onMounted(() => {
-  // Set up periodic health fetching every 0.5 seconds
-  setInterval(fetchServerHealth, 500);
-});
 
 </script>
 
@@ -61,7 +45,9 @@ onMounted(() => {
   <main class="container">
     <div id="grid-container">
         <div id="navbar" >
-          <img src="./assets/dropdown.svg" width="30px" @click="collapseNavbar()" />
+          <div id="menu-button" @click="collapseNavbar()">
+            <img src="./assets/dropdown.svg" width="30px" />
+          </div>
           <div id="collapse">
             <div id="nav-upper">
               <button @click="setActive(ControlPanel)">Control</button>
@@ -76,8 +62,9 @@ onMounted(() => {
           </div>
         </div>
         <component :is="window_content" class="swap-container"></component>
+        
       </div>
-      <server-bar></server-bar>
+      <server-bar @update-ip="get_ip"></server-bar>
   </main>
 </template>
 
