@@ -2,15 +2,21 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ref, onMounted} from "vue";
 
+import { Panel } from "primevue";
+
 let server_ip;
 const cameras = ref();
 
 let arr = [];
 
+const text = ref();
+
 async function get_list() {
+    arr = []; // empty array on call
     invoke("fetch_server_ip").then((ip) => {
         server_ip = ip;
     });
+    text.value = "Fetching Cameras...";
     const camera_url = `http://${server_ip}:8000/v1/cameras`;
     fetch(camera_url, { headers: { "Authorization": `Basic ${btoa("admin:propteambestteam")}`}})    
     .then 
@@ -42,16 +48,17 @@ function refresh_list() {
 
 function cam_right(ip) {
     //TODO: update x_movement/y_movement amounts
-    fetch(`${ip}:8000/v1/camera?ip=${ip}&x_movement=0.2&y_movement=0`, {
+    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=-0.2&y_movement=0`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
         }
     });
+    text.value = "t";
 }
 
 function cam_left(ip) { 
-    fetch(`${ip}:8000/v1/camera?ip=${ip}&x_movement=-0.2&y_movement=0`, {
+    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0.2&y_movement=0`, {
         method: "POST",
         headers: {
             "Authorization": `Basic ${btoa("admin:propteambestteam")}`
@@ -60,19 +67,19 @@ function cam_left(ip) {
 }
 
 function cam_up(ip) {
-    fetch(`${ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=0.2`, {
+    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=0.2`, {
         method: "POST",
         headers: {
-            "Atthorization": `Basic ${btoa("admin:propteambestteam")}`
+            "Authorization": `Basic ${btoa("admin:propteambestteam")}`
         }
     });
 }
 
 function cam_down(ip) {
-    fetch(`${ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=-0.2`, {
+    fetch(`http://${server_ip}:8000/v1/camera?ip=${ip}&x_movement=0&y_movement=-0.2`, {
         method: "POST",
         headers: {
-            "Authorization  ": `Basic ${btoa("admin:propteambestteam")}`
+            "Authorization": `Basic ${btoa("admin:propteambestteam")}`
         }
     });
 }
@@ -82,16 +89,26 @@ function cam_down(ip) {
 <template>
     <div>
         <h1>Camera View</h1>
-        <div className="camera_control" v-for="(item, index) in arr" :key="index" >
-            <h>{{ item.hostname }}</h>
-            <iframe :src="`${camera_url}:8889${item.stream_path}`" width="400" />
-            <button @click="cam_right(item.ip)">right</button>
-            <button @click="cam_left(item.ip)">left</button>
-            <button @click="cam_up(item.ip)">up</button>
-            <button @click="cam_down(item.ip)">down</button>
-        </div>
         <button @click="get_list">get</button>
         <button @click="refresh_list">refresh</button>
         <p>Cameras Output: {{ text }}</p>
+        <div className="camera_control" v-for="(item, index) in arr" :key="index" >
+            <Panel :header="item.hostname" toggleable="true">
+                <iframe :src="`http://${server_ip}:8889${item.stream_path}?autoplay=true`" width="800" height="568" /> 
+                <br>
+                <button @click="cam_left(item.ip)">left</button>
+                <button @click="cam_right(item.ip)">right</button>
+                <button @click="cam_up(item.ip)">up</button>
+                <button @click="cam_down(item.ip)">down</button>
+            </Panel>
+        </div>
+        
+        
     </div>
 </template>
+
+<style scoped>
+    #camera_control {
+        border: 2px, blue;
+    }
+</style>
