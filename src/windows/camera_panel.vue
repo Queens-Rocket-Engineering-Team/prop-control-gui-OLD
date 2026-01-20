@@ -1,6 +1,6 @@
 <script setup>
 import { invoke } from "@tauri-apps/api/core";
-import { ref, onMounted} from "vue";
+import { ref} from "vue";
 
 import { Panel } from "primevue";
 
@@ -109,6 +109,7 @@ function cam_down(ip) {
 
 <style scoped>
     #camera_control {
-        border: 2px, blue;
+        border: 2px solid blue;
+        overflow: scroll;
     }
 </style>
