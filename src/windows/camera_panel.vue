@@ -87,12 +87,12 @@ function cam_down(ip) {
 </script>
 
 <template>
-    <div>
+    <div id="camera_control">
         <h1>Camera View</h1>
         <button @click="get_list">get</button>
         <button @click="refresh_list">refresh</button>
         <p>Cameras Output: {{ text }}</p>
-        <div className="camera_control" v-for="(item, index) in arr" :key="index" >
+        <div v-for="(item, index) in arr" :key="index" >
             <Panel :header="item.hostname" toggleable="true">
                 <iframe :src="`http://${server_ip}:8889${item.stream_path}?autoplay=true`" width="800" height="568" /> 
                 <br>
@@ -109,7 +109,6 @@ function cam_down(ip) {
 
 <style scoped>
     #camera_control {
-        border: 2px solid blue;
         overflow: scroll;
     }
 </style>
