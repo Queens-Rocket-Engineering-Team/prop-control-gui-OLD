@@ -8,6 +8,7 @@ Run locally with:
 
 Adjust API_BASE and REDIS settings below.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,16 @@ import csv
 
 import httpx
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QThread, QThreadPool, QRunnable, Signal, Slot, Qt, QTimer
+from PySide6.QtCore import (
+    QObject,
+    QThread,
+    QThreadPool,
+    QRunnable,
+    Signal,
+    Slot,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -54,13 +64,14 @@ pg.setConfigOptions(useOpenGL=False, antialias=True)
 # Config
 # -----------------------------
 
+
 @dataclass
 class Config:
-    api_base: str = "http://192.168.1.100:8000"
+    api_base: str = "http://localhost:8000"
     commands_path: str = "/v1/command"
     api_username: str = "noah"
     api_password: str = "stinkylion"
-    redis_host: str = "192.168.1.100"
+    redis_host: str = "localhost"
     redis_port: int = 6379
     redis_channel: str = "log"
     redis_username: str = "roclient"
@@ -73,8 +84,6 @@ CONFIG = Config()
 ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
-
-
 class HttpRequestSignals(QObject):
     success = Signal(object)
     error = Signal(str)
@@ -82,12 +91,25 @@ class HttpRequestSignals(QObject):
 
 
 class HttpRequestWorker(QRunnable):
-    def __init__(self, method: str,
-                 url: str,
-                 *,
-                 json_body: Optional[dict] = None,
-                 timeout: float = 5.0,
-                 auth: Optional[tuple[str, str]] = None):
+    # Persistent, reusable HTTP client for connection pooling
+    _client: Optional[httpx.Client] = None
+
+    @classmethod
+    def get_client(cls) -> httpx.Client:
+        """Return a shared HTTP client instance for connection pooling."""
+        if cls._client is None:
+            cls._client = httpx.Client(timeout=2.0)
+        return cls._client
+
+    def __init__(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: Optional[dict] = None,
+        timeout: float = 2.0,
+        auth: Optional[tuple[str, str]] = None,
+    ):
         super().__init__()
         self.method = method.upper()
         self.url = url
@@ -99,13 +121,22 @@ class HttpRequestWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            with httpx.Client(timeout=self.timeout, auth=self.auth) as client:
-                if self.method == "GET":
-                    resp = client.get(self.url)
-                elif self.method == "POST":
-                    resp = client.post(self.url, json=self.json_body)
-                else:
-                    resp = client.request(self.method, self.url, json=self.json_body)
+            client = self.get_client()
+            # Override timeout and auth per-request
+            if self.method == "GET":
+                resp = client.get(self.url, timeout=self.timeout, auth=self.auth)
+            elif self.method == "POST":
+                resp = client.post(
+                    self.url, json=self.json_body, timeout=self.timeout, auth=self.auth
+                )
+            else:
+                resp = client.request(
+                    self.method,
+                    self.url,
+                    json=self.json_body,
+                    timeout=self.timeout,
+                    auth=self.auth,
+                )
 
             resp.raise_for_status()
             try:
@@ -125,7 +156,15 @@ class RedisTailer(QThread):
     status = Signal(str)
     error = Signal(str)
 
-    def __init__(self, host: str, port: int, channel: str, username: str, password: str, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        channel: str,
+        username: str,
+        password: str,
+        parent: Optional[QObject] = None,
+    ):
         super().__init__(parent)
         self.host = host
         self.port = port
@@ -138,14 +177,19 @@ class RedisTailer(QThread):
     def run(self) -> None:
         try:
             import redis
+
             client = redis.Redis(
-                host=self.host, port=self.port,
-                username=self.username, password=self.password,
+                host=self.host,
+                port=self.port,
+                username=self.username,
+                password=self.password,
                 decode_responses=True,
             )
             self._pubsub = client.pubsub(ignore_subscribe_messages=True)
             self._pubsub.subscribe(self.channel)
-            self.status.emit(f"Subscribed to redis://{self.host}:{self.port} channel '{self.channel}'")
+            self.status.emit(
+                f"Subscribed to redis://{self.host}:{self.port} channel '{self.channel}'"
+            )
 
             count = 0
             while not self._stop_flag.is_set():
@@ -181,7 +225,6 @@ class RedisTailer(QThread):
                 pass
             self.status.emit("Redis tailer stopped.")
 
-
     def stop(self) -> None:
         self._stop_flag.set()
 
@@ -190,9 +233,9 @@ class keySwitchMonitor(QThread):
     statusSig = Signal(int)
     messageSig = Signal(str)
 
-    def __init__(self, port:str):
+    def __init__(self, port: str):
         super().__init__()
-        self.status: int | None = None # Open is 0, 1 is closed
+        self.status: int | None = None  # Open is 0, 1 is closed
         self.espSerial = serial.Serial(port)
 
     def run(self):
@@ -203,6 +246,7 @@ class keySwitchMonitor(QThread):
             if stat != self.status and stat in [0, 1]:
                 self.status = stat
                 self.statusSig.emit(self.status)
+
 
 # -----------------------------
 # Controls
@@ -235,21 +279,30 @@ class ControlsPanel(QGroupBox):
         layout.addWidget(self.btn_ping)
         self.setLayout(layout)
 
+
 # -----------------------------
 # Controls sidebar with per-control Open/Close
 # -----------------------------
 class ControlsSidebar(QGroupBox):
     controlRequested = Signal(str, str)  # (name, action)
 
-    def __init__(self, parent: Optional[QWidget] = None, controls: Optional[list[str]] = None, general_widget: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        controls: Optional[list[str]] = None,
+        general_widget: Optional[QWidget] = None,
+    ) -> None:
         super().__init__("Controls", parent)
         if controls is None:
             av_controls = [
-                "AVFILL", "AVRUN", "AVDUMP", "AVPURGE1", "AVPURGE2", "AVVENT"
+                "AVFILL",
+                "AVRUN",
+                "AVDUMP",
+                "AVPURGE1",
+                "AVPURGE2",
+                "AVVENT",
             ]
-            power_controls = [
-                "SAFE24", "IGN"
-            ]
+            power_controls = ["SAFE24", "IGN"]
         else:
             # If custom controls are provided, split them by name
             av_controls = [c for c in controls if c.startswith("AV")]
@@ -269,8 +322,12 @@ class ControlsSidebar(QGroupBox):
             btn_close = QPushButton("Close", box)
             self.controlButtons[f"{name}_open"] = btn_open
             self.controlButtons[f"{name}_close"] = btn_close
-            btn_open.clicked.connect(lambda _=False, n=name: self.controlRequested.emit(n, "OPEN"))
-            btn_close.clicked.connect(lambda _=False, n=name: self.controlRequested.emit(n, "CLOSE"))
+            btn_open.clicked.connect(
+                lambda _=False, n=name: self.controlRequested.emit(n, "OPEN")
+            )
+            btn_close.clicked.connect(
+                lambda _=False, n=name: self.controlRequested.emit(n, "CLOSE")
+            )
             h.addWidget(btn_open)
             h.addWidget(btn_close)
             box.setLayout(h)
@@ -283,7 +340,9 @@ class ControlsSidebar(QGroupBox):
         valves_layout.addWidget(self.btn_default_positions)
 
         # Connect buttons to signals
-        self.btn_close_all.clicked.connect(lambda: [self.controlRequested.emit(name, "CLOSE") for name in av_controls])
+        self.btn_close_all.clicked.connect(
+            lambda: [self.controlRequested.emit(name, "CLOSE") for name in av_controls]
+        )
         self.btn_default_positions.clicked.connect(self.handleDefaultButton)
 
         valves_layout.addStretch(1)
@@ -300,8 +359,12 @@ class ControlsSidebar(QGroupBox):
             btn_close = QPushButton("Close", box)
             self.controlButtons[f"{name}_open"] = btn_open
             self.controlButtons[f"{name}_close"] = btn_close
-            btn_open.clicked.connect(lambda _=False, n=name: self.controlRequested.emit(n, "OPEN"))
-            btn_close.clicked.connect(lambda _=False, n=name: self.controlRequested.emit(n, "CLOSE"))
+            btn_open.clicked.connect(
+                lambda _=False, n=name: self.controlRequested.emit(n, "OPEN")
+            )
+            btn_close.clicked.connect(
+                lambda _=False, n=name: self.controlRequested.emit(n, "CLOSE")
+            )
             h.addWidget(btn_open)
             h.addWidget(btn_close)
             box.setLayout(h)
@@ -313,7 +376,7 @@ class ControlsSidebar(QGroupBox):
         # Spacer so the General group stays at the bottom
         v.addStretch(1)
 
-    # General controls subbox (at the bottom)
+        # General controls subbox (at the bottom)
         general_box = QGroupBox("General", self)
         general_layout = QVBoxLayout(general_box)
         if general_widget is not None:
@@ -329,7 +392,7 @@ class ControlsSidebar(QGroupBox):
             "Confirm Reset",
             "This will reset all controls to their default positions and may dump oxidizer to the air. Do you want to continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
             self.controlRequested.emit("ALL", "DEFAULT")
@@ -341,7 +404,9 @@ class ControlsSidebar(QGroupBox):
 # Credentials dialog (username + password)
 # -----------------------------
 class CredentialsDialog(QDialog):
-    def __init__(self, username: str = "", password: str = "", parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self, username: str = "", password: str = "", parent: Optional[QWidget] = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("API Credentials")
         form = QFormLayout(self)
@@ -361,11 +426,14 @@ class CredentialsDialog(QDialog):
     def values(self) -> tuple[str, str]:
         return self.user_edit.text().strip(), self.pass_edit.text().strip()
 
+
 # -----------------------------
 # Dynamic graph panel using pyqtgraph
 # -----------------------------
 class GraphPanel(QWidget):
-    def __init__(self, columns: int = 1, max_points: int = 2000, parent: Optional[QWidget] = None):
+    def __init__(
+        self, columns: int = 1, max_points: int = 2000, parent: Optional[QWidget] = None
+    ):
         super().__init__(parent)
         self.columns = 1  # Force single column
         self.max_points = max_points
@@ -378,9 +446,11 @@ class GraphPanel(QWidget):
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._plots: dict[str, pg.PlotWidget] = {}
         self._data: dict[str, tuple[list[float], list[float]]] = {}
-        self._last_t: dict[str, float] = {}  # track last timestamp per series to avoid duplicates
+        self._last_t: dict[
+            str, float
+        ] = {}  # track last timestamp per series to avoid duplicates
         self._readouts: dict[str, QLabel] = {}  # name -> QLabel
-        self._titles: dict[str, QLabel] = {}    # name -> QLabel
+        self._titles: dict[str, QLabel] = {}  # name -> QLabel
         self._units: dict[str, str] = {}  # key: full series or base name -> unit
         # Display-only tare offsets per series; raw data in _data remains unchanged
         self._tare_offsets: dict[str, float] = {}
@@ -419,7 +489,9 @@ class GraphPanel(QWidget):
 
         # Per-series Tare button (display-only offset)
         tare_btn = QPushButton("Tare")
-        tare_btn.setToolTip("Zero this series by subtracting the current value from the display")
+        tare_btn.setToolTip(
+            "Zero this series by subtracting the current value from the display"
+        )
         tare_btn.clicked.connect(lambda _=False, n=name: self.tare_series(n))
         left_layout.addWidget(tare_btn)
         left_layout.addStretch(1)
@@ -509,7 +581,7 @@ class GraphPanel(QWidget):
                 # If first point is after pad_start, pad with NaN
                 if plot_xs[0] > pad_start:
                     plot_xs = [pad_start] + plot_xs
-                    plot_ys = [float('nan')] + plot_ys
+                    plot_ys = [float("nan")] + plot_ys
             # Always set x range to window_end - window_seconds to window_end
             plot_widget = self._plots.get(name)
             if plot_widget is not None:
@@ -532,7 +604,9 @@ class GraphPanel(QWidget):
         if name in self._readouts:
             unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
             disp_y = y - self._tare_offsets.get(name, 0.0)
-            self._readouts[name].setText(f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}")
+            self._readouts[name].setText(
+                f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}"
+            )
 
     def tare_series(self, name: str) -> None:
         """Set a display-only zero offset for a series to its current value and refresh the plot."""
@@ -587,7 +661,7 @@ class GraphPanel(QWidget):
                     pad_start = 0
                 if plot_xs[0] > pad_start:
                     plot_xs = [pad_start] + plot_xs
-                    plot_ys = [float('nan')] + plot_ys
+                    plot_ys = [float("nan")] + plot_ys
             plot_widget = self._plots.get(name)
             if plot_widget is not None:
                 plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
@@ -601,7 +675,10 @@ class GraphPanel(QWidget):
         if name in self._readouts and ys:
             unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
             disp_y = ys[-1] - self._tare_offsets.get(name, 0.0)
-            self._readouts[name].setText(f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}")
+            self._readouts[name].setText(
+                f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}"
+            )
+
 
 class DataLogger(QObject):
     """Buffered wide-CSV logger with per-device row assembly and periodic flushes.
@@ -625,7 +702,9 @@ class DataLogger(QObject):
     def is_active(self) -> bool:
         return self._file is not None
 
-    def start(self, base_dir: Path, start_dt: datetime, columns: Optional[list[str]] = None) -> None:
+    def start(
+        self, base_dir: Path, start_dt: datetime, columns: Optional[list[str]] = None
+    ) -> None:
         base_dir.mkdir(parents=True, exist_ok=True)
         fname = f"PANDA-TEST-{start_dt.strftime('%d%m%y-%H%M%S')}.csv"
         self.path = base_dir / fname
@@ -647,7 +726,7 @@ class DataLogger(QObject):
     def log(self, device: str, t: float, name: str, value: float) -> None:
         if not self._writer:
             return
-    # Always record incoming sensor values; columns are handled at finalize time
+        # Always record incoming sensor values; columns are handled at finalize time
         prev_t = self._current_t.get(device)
         if prev_t is None:
             self._current_t[device] = t
@@ -726,8 +805,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Prop Control")
 
         self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(
+            10
+        )  # Increase from default to handle more concurrent operations
         # Avoid saturating the machine with too many concurrent requests
-        self._http_workers: set[HttpRequestWorker] = set()  # keep refs to prevent GC/segfaults
+        self._http_workers: set[HttpRequestWorker] = (
+            set()
+        )  # keep refs to prevent GC/segfaults
         self.redis_thread: Optional[RedisTailer] = None
 
         self._pending_points = []
@@ -738,13 +822,15 @@ class MainWindow(QMainWindow):
 
         self.deviceConfig = None
 
-
         # ----
         # Menu selections
         # ----
 
         server_menu = self.menuBar().addMenu("Server")
-        self.server_ips = ["192.168.0.101"]
+        self.server_ips = [
+            "localhost",
+            "192.168.0.101",
+        ]
         self.default_server_ip = self.server_ips[0]
 
         for ip in self.server_ips:
@@ -773,7 +859,6 @@ class MainWindow(QMainWindow):
         self.act_show_log = QAction("Show Log", self, checkable=True)
         self.act_show_log.setChecked(True)
         view_menu.addAction(self.act_show_log)
-
 
         # ----
         # Controls (moved into sidebar General group)
@@ -858,10 +943,16 @@ class MainWindow(QMainWindow):
         self.append_log(f"Keyswitch changed to {status} position")
         for buttonName in self.controlButtons:
             self.append_log(f"checking {buttonName}")
-            if buttonName in ["SAFE24_open", "SAFE24_close",
-                               "IGN_open", "IGN_close",
-                               "AVFILL_open", "AVFILL_close",
-                               "AVRUN_open", "AVRUN_close"]:
+            if buttonName in [
+                "SAFE24_open",
+                "SAFE24_close",
+                "IGN_open",
+                "IGN_close",
+                "AVFILL_open",
+                "AVFILL_close",
+                "AVRUN_open",
+                "AVRUN_close",
+            ]:
                 if status == 1:
                     self.append_log(f"Enabling {buttonName}")
                     self.controlButtons[f"{buttonName}"].setEnabled(True)
@@ -879,7 +970,6 @@ class MainWindow(QMainWindow):
             self.controls_sidebar.btn_close_all.setEnabled(True)
             self.controls_sidebar.btn_default_positions.setEnabled(True)
 
-
     def _collect_sensor_columns(self) -> list[str]:
         """Collect sensor names from deviceConfig for CSV header order.
         Searches common keys per device: sensors, telemetry, signals, readings, measurements.
@@ -892,7 +982,13 @@ class MainWindow(QMainWindow):
                 for _dev, devDict in container.items():
                     if not isinstance(devDict, dict):
                         continue
-                    for key in ("sensors", "telemetry", "signals", "readings", "measurements"):
+                    for key in (
+                        "sensors",
+                        "telemetry",
+                        "signals",
+                        "readings",
+                        "measurements",
+                    ):
                         coll = devDict.get(key)
                         if isinstance(coll, dict):
                             for sig in coll.keys():
@@ -915,17 +1011,24 @@ class MainWindow(QMainWindow):
         self.start_redis()
 
     def set_api_credentials(self):
-        dlg = CredentialsDialog(self.config.api_username, self.config.api_password, self)
+        dlg = CredentialsDialog(
+            self.config.api_username, self.config.api_password, self
+        )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         user, pwd = dlg.values()
         if not user or not pwd:
-            QMessageBox.warning(self, "API Credentials", "Username and password cannot be empty.")
+            QMessageBox.warning(
+                self, "API Credentials", "Username and password cannot be empty."
+            )
             return
         self.validate_auth(user, pwd)
 
     def validate_auth(self, user: str, pwd: str) -> None:
-        base = self.config.api_base.strip().rstrip("/") or f"http://{self.config.redis_host}:8000"
+        base = (
+            self.config.api_base.strip().rstrip("/")
+            or f"http://{self.config.redis_host}:8000"
+        )
         url = base + "/auth"
         self.append_log(f"Validating credentials at {url}")
         worker = HttpRequestWorker("GET", url, auth=(user, pwd))
@@ -939,7 +1042,9 @@ class MainWindow(QMainWindow):
 
         def on_err(msg: str) -> None:
             self.append_log(f"Auth ERROR: {msg}")
-            QMessageBox.warning(self, "Authentication Failed", f"/auth check failed:\n{msg}")
+            QMessageBox.warning(
+                self, "Authentication Failed", f"/auth check failed:\n{msg}"
+            )
 
         worker.signals.success.connect(on_ok)
         worker.signals.error.connect(on_err)
@@ -959,27 +1064,27 @@ class MainWindow(QMainWindow):
         url = base.rstrip("/") + "/health"
         self.append_log(f"GET {url}")
         worker = HttpRequestWorker("GET", url, auth=auth)
-        worker.signals.success.connect(lambda payload: self.append_log(f"Ping OK: {payload}"))
+        worker.signals.success.connect(
+            lambda payload: self.append_log(f"Ping OK: {payload}")
+        )
         worker.signals.error.connect(lambda msg: self.append_log(f"Ping ERROR: {msg}"))
         self.thread_pool.start(worker)
-
-
 
     def setControlButtonsToDefault(self) -> None:
         if not isinstance(self.deviceConfig, dict):
             return
 
         for devName, devDict in self.deviceConfig.get("configs", {}).items():
-                self.append_log(f"Device found: {devName}")
-                for control, controlDict in devDict.get("controls", {}).items():
-                    control = control.upper()
-                    defaultState = controlDict.get("defaultState", None)
-                    if defaultState == "OPEN":
-                        self.controlButtons[f"{control}_open"].setEnabled(False)
-                        self.controlButtons[f"{control}_close"].setEnabled(True)
-                    elif defaultState == "CLOSED":
-                        self.controlButtons[f"{control}_open"].setEnabled(True)
-                        self.controlButtons[f"{control}_close"].setEnabled(False)
+            self.append_log(f"Device found: {devName}")
+            for control, controlDict in devDict.get("controls", {}).items():
+                control = control.upper()
+                defaultState = controlDict.get("defaultState", None)
+                if defaultState == "OPEN":
+                    self.controlButtons[f"{control}_open"].setEnabled(False)
+                    self.controlButtons[f"{control}_close"].setEnabled(True)
+                elif defaultState == "CLOSED":
+                    self.controlButtons[f"{control}_open"].setEnabled(True)
+                    self.controlButtons[f"{control}_close"].setEnabled(False)
 
     def handleConfigResponse(self, payload: dict) -> None:
         self.append_log(f"Config response: {payload}")
@@ -1028,7 +1133,9 @@ class MainWindow(QMainWindow):
                 for sig, meta in coll.items():
                     unit_val: Optional[str] = None
                     if isinstance(meta, dict):
-                        unit_val = meta.get("unit") or meta.get("units") or meta.get("uom")
+                        unit_val = (
+                            meta.get("unit") or meta.get("units") or meta.get("uom")
+                        )
                     if isinstance(unit_val, str) and unit_val.strip():
                         self.graphs.set_unit(f"{dev}:{sig}", unit_val.strip())
                         self.graphs.set_unit(sig, unit_val.strip())
@@ -1039,7 +1146,9 @@ class MainWindow(QMainWindow):
         self.append_log(f"GET {url}")
         worker = HttpRequestWorker("GET", url, auth=auth)
         worker.signals.success.connect(self.handleConfigResponse)
-        worker.signals.error.connect(lambda msg: self.append_log(f"Config ERROR: {msg}"))
+        worker.signals.error.connect(
+            lambda msg: self.append_log(f"Config ERROR: {msg}")
+        )
         self.thread_pool.start(worker)
 
     def send_status_request(self) -> None:
@@ -1048,8 +1157,12 @@ class MainWindow(QMainWindow):
             url = base.rstrip("/") + "/status"
             self.append_log(f"GET {url}")
             worker = HttpRequestWorker("GET", url, auth=auth)
-            worker.signals.success.connect(lambda payload: self.append_log(f"Status OK: {payload}"))
-            worker.signals.error.connect(lambda msg: self.append_log(f"Status ERROR: {msg}"))
+            worker.signals.success.connect(
+                lambda payload: self.append_log(f"Status OK: {payload}")
+            )
+            worker.signals.error.connect(
+                lambda msg: self.append_log(f"Status ERROR: {msg}")
+            )
             self.thread_pool.start(worker)
         except Exception as e:
             self.append_log(f"Failed to send status request: {e}")
@@ -1059,8 +1172,12 @@ class MainWindow(QMainWindow):
         _, auth = self._base_and_auth()
         self.append_log(f"POST {url} -> {payload}")
         worker = HttpRequestWorker("POST", url, json_body=payload, auth=auth)
-        worker.signals.success.connect(lambda resp: self.append_log(f"Command OK: {resp}"))
-        worker.signals.error.connect(lambda msg: self.append_log(f"Command ERROR: {msg}"))
+        worker.signals.success.connect(
+            lambda resp: self.append_log(f"Command OK: {resp}")
+        )
+        worker.signals.error.connect(
+            lambda msg: self.append_log(f"Command ERROR: {msg}")
+        )
         # track worker to prevent premature GC while running
         self._http_workers.add(worker)
         worker.signals.finished.connect(lambda: self._http_workers.discard(worker))
@@ -1087,7 +1204,6 @@ class MainWindow(QMainWindow):
         self.redis_thread.status.connect(self.append_log)
         self.redis_thread.error.connect(lambda e: self.append_log(f"Redis ERROR: {e}"))
         self.redis_thread.start()
-
 
     @Slot()
     def stop_redis(self) -> None:
@@ -1165,10 +1281,12 @@ class MainWindow(QMainWindow):
 
         # Strict data-line matcher: "DEVICE <t> NAME:VAL" (no ANSI, one line)
         DATA_LOG_RE = re.compile(
-            r'^(?P<device>\S+)\s+(?P<t>[+-]?\d+(?:\.\d+)?)\s+(?P<name>[A-Za-z0-9_]+):(?P<val>[+-]?\d+(?:\.\d+)?)$'
+            r"^(?P<device>\S+)\s+(?P<t>[+-]?\d+(?:\.\d+)?)\s+(?P<name>[A-Za-z0-9_]+):(?P<val>[+-]?\d+(?:\.\d+)?)$"
         )
-        CONTROL_LOG_RE = re.compile(r'^(?P<device>\S+)\s+CONTROL\s+(?P<control>\S+)\s+(?P<action>\S+)$')
-        STATUS_LOG_RE = re.compile(r'^(?P<device>\S+):\s+STATUS\s+(?P<status>.+)$')
+        CONTROL_LOG_RE = re.compile(
+            r"^(?P<device>\S+)\s+CONTROL\s+(?P<control>\S+)\s+(?P<action>\S+)$"
+        )
+        STATUS_LOG_RE = re.compile(r"^(?P<device>\S+):\s+STATUS\s+(?P<status>.+)$")
 
         # Parse out data values
         dataMatch = DATA_LOG_RE.match(m)
@@ -1183,7 +1301,6 @@ class MainWindow(QMainWindow):
 
         if not dataMatch:
             return  # ignore non-data lines
-
 
     def handleDataString(self, data: re.Match) -> None:
         # Process the incoming data string
@@ -1234,7 +1351,6 @@ class MainWindow(QMainWindow):
                 self.controlButtons[f"{control}_close"].setEnabled(False)
                 self.controlButtons[f"{control}_open"].setEnabled(True)
 
-
     def append_log(self, line: str) -> None:
         self.log.append(line)
         self.statusBar().showMessage(line, 3000)
@@ -1257,7 +1373,9 @@ class MainWindow(QMainWindow):
         pwd = self.config.api_password.strip() or (parts.password or "")
         host = parts.hostname or ""
         netloc = host + (f":{parts.port}" if parts.port else "")
-        base = urlunsplit((parts.scheme or "http", netloc, parts.path, parts.query, parts.fragment))
+        base = urlunsplit(
+            (parts.scheme or "http", netloc, parts.path, parts.query, parts.fragment)
+        )
         auth = (user, pwd) if user and pwd else None
         return base, auth
 
