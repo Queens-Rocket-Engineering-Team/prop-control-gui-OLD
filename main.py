@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import serial
+import socket
 import sys
 import threading
 import re
@@ -74,8 +75,8 @@ class Config:
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_channel: str = "log"
-    redis_username: str = "roclient"
-    redis_password: str = "password"
+    redis_username: str = "server"
+    redis_password: str = "propteambestteam"
 
 
 CONFIG = Config()
@@ -178,13 +179,30 @@ class RedisTailer(QThread):
         try:
             import redis
 
+            # Add connection timeouts to prevent long hangs
+            # socket_connect_timeout: time to establish connection
+            # socket_timeout: time to receive data
+            # retry_on_timeout: retry on socket timeout
             client = redis.Redis(
                 host=self.host,
                 port=self.port,
                 username=self.username,
                 password=self.password,
                 decode_responses=True,
+                socket_connect_timeout=2.0,  # 2 sec timeout to connect
+                socket_timeout=2.0,  # 2 sec timeout for operations
+                socket_keepalive=True,
+                socket_keepalive_options={
+                    1: 1,  # TCP_KEEPIDLE: start after 1 second of inactivity
+                    2: 1,  # TCP_KEEPINTVL: repeat every 1 second
+                    3: 3,  # TCP_KEEPCNT: give up after 3 probes
+                }
+                if hasattr(socket, "TCP_KEEPIDLE")
+                else None,
             )
+            # Test connection immediately
+            client.ping()
+
             self._pubsub = client.pubsub(ignore_subscribe_messages=True)
             self._pubsub.subscribe(self.channel)
             self.status.emit(
@@ -193,7 +211,7 @@ class RedisTailer(QThread):
 
             count = 0
             while not self._stop_flag.is_set():
-                item = self._pubsub.get_message(timeout=1.0)  # seconds
+                item = self._pubsub.get_message(timeout=0.1)  # 100ms, non-blocking
                 if not item:
                     continue
                 if item.get("type") == "message":
@@ -212,7 +230,7 @@ class RedisTailer(QThread):
                             self.message.emit(line)
 
                 count += 1
-                if count % 10 == 0:
+                if count % 100 == 0:
                     QApplication.processEvents()  # keep GUI responsive
 
         except Exception as e:
@@ -546,16 +564,46 @@ class GraphPanel(QWidget):
         xs.append(t)
         ys.append(y)
 
+        # Update readout but skip expensive rendering
+        if name in self._readouts:
+            unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
+            disp_y = y - self._tare_offsets.get(name, 0.0)
+            self._readouts[name].setText(
+                f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}"
+            )
+
+    def add_point_batch(self, name: str, points: list[tuple[float, float]]) -> None:
+        """Add multiple points for a series and render once."""
+        if not name or not points:
+            return
+
+        curve = self.ensure_plot(name)
+        xs, ys = self._data[name]
+
+        # Add all points, filtering by time
+        for t, y in points:
+            last = self._last_t.get(name)
+            if last is not None and t <= last:
+                continue
+            self._last_t[name] = t
+            xs.append(t)
+            ys.append(y)
+
+        if not xs:
+            return
+
+        # Get final timestamp for rendering
+        t = xs[-1]
+
         # Only plot the last window_seconds, but keep all data in xs/ys
         min_t = t - self.window_seconds
-        # Find the first index where xs[idx] >= min_t
         start_idx = 0
         for i, tx in enumerate(xs):
             if tx >= min_t:
                 start_idx = i
                 break
         else:
-            start_idx = len(xs)  # all points are older
+            start_idx = len(xs)
 
         if start_idx > 0:
             del xs[:start_idx]
@@ -569,41 +617,30 @@ class GraphPanel(QWidget):
         if offset:
             plot_ys = [v - offset for v in plot_ys]
 
-        # Pad the window if not enough data to fill window_seconds
+        # Render plot with proper range
         if plot_xs:
-            window_start = plot_xs[0]
             window_end = plot_xs[-1]
-            # If less than window_seconds, pad at the left
-            if window_end - window_start < self.window_seconds:
+            if window_end - plot_xs[0] < self.window_seconds:
                 pad_start = window_end - self.window_seconds
                 if pad_start < 0:
                     pad_start = 0
-                # If first point is after pad_start, pad with NaN
                 if plot_xs[0] > pad_start:
                     plot_xs = [pad_start] + plot_xs
                     plot_ys = [float("nan")] + plot_ys
-            # Always set x range to window_end - window_seconds to window_end
+            # Set x range
             plot_widget = self._plots.get(name)
             if plot_widget is not None:
                 plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
                 view_box = getattr(plot_item, "getViewBox", lambda: None)()
                 if view_box is not None:
                     view_box.setXRange(window_end - self.window_seconds, window_end)
-        else:
-            # No data yet, set x range to t - window_seconds to t
-            plot_widget = self._plots.get(name)
-            if plot_widget is not None:
-                plot_item = getattr(plot_widget, "getPlotItem", lambda: None)()
-                view_box = getattr(plot_item, "getViewBox", lambda: None)()
-                if view_box is not None:
-                    view_box.setXRange(t - self.window_seconds, t)
 
         curve.setData(plot_xs, plot_ys)
 
-        # Update live readout (append unit if available)
-        if name in self._readouts:
+        # Update live readout with last point
+        if name in self._readouts and ys:
             unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
-            disp_y = y - self._tare_offsets.get(name, 0.0)
+            disp_y = ys[-1] - self._tare_offsets.get(name, 0.0)
             self._readouts[name].setText(
                 f"{disp_y:.3f} {unit}" if unit else f"{disp_y:.3f}"
             )
@@ -626,7 +663,6 @@ class GraphPanel(QWidget):
             return
         xs, ys = self._data[name]
         if not xs:
-            # Clear plot and readout
             curve = self._curves.get(name)
             if curve is not None:
                 curve.setData([], [])
@@ -634,16 +670,9 @@ class GraphPanel(QWidget):
                 self._readouts[name].setText("--")
             return
 
-        # Use last timestamp to compute window
         t = xs[-1]
         min_t = t - self.window_seconds
-        start_idx = 0
-        for i, tx in enumerate(xs):
-            if tx >= min_t:
-                start_idx = i
-                break
-        else:
-            start_idx = len(xs)
+        start_idx = next((i for i, tx in enumerate(xs) if tx >= min_t), len(xs))
 
         plot_xs = xs[start_idx:]
         plot_ys = ys[start_idx:]
@@ -653,12 +682,9 @@ class GraphPanel(QWidget):
             plot_ys = [v - offset for v in plot_ys]
 
         if plot_xs:
-            window_start = plot_xs[0]
             window_end = plot_xs[-1]
-            if window_end - window_start < self.window_seconds:
-                pad_start = window_end - self.window_seconds
-                if pad_start < 0:
-                    pad_start = 0
+            if window_end - plot_xs[0] < self.window_seconds:
+                pad_start = max(0, window_end - self.window_seconds)
                 if plot_xs[0] > pad_start:
                     plot_xs = [pad_start] + plot_xs
                     plot_ys = [float("nan")] + plot_ys
@@ -668,10 +694,10 @@ class GraphPanel(QWidget):
                 view_box = getattr(plot_item, "getViewBox", lambda: None)()
                 if view_box is not None:
                     view_box.setXRange(window_end - self.window_seconds, window_end)
+
         curve = self._curves.get(name)
         if curve is not None:
             curve.setData(plot_xs, plot_ys)
-        # Update readout with offset applied
         if name in self._readouts and ys:
             unit = self._units.get(name) or self._units.get(name.split(":", 1)[-1])
             disp_y = ys[-1] - self._tare_offsets.get(name, 0.0)
@@ -816,9 +842,10 @@ class MainWindow(QMainWindow):
 
         self._pending_points = []
         self._plot_timer = QTimer(self)
-        self._plot_timer.setInterval(30)  # ms, adjust as needed
+        self._plot_timer.setInterval(200)  # 100ms - reduced render frequency
         self._plot_timer.timeout.connect(self.flush_pending_points)
         self._plot_timer.start()
+        self._last_render_time = 0  # throttle plot renders
 
         self.deviceConfig = None
 
@@ -922,10 +949,10 @@ class MainWindow(QMainWindow):
         self.btn_stream.clicked.connect(self.on_stream)
         self.btn_stop.clicked.connect(self.on_stop)
 
-        # Server setup
-        self.set_server_ip(self.default_server_ip)
-        self.send_config_request()
-        self.send_status_request()
+        # Server setup - defer to event loop to avoid blocking on Redis connection
+        QTimer.singleShot(100, lambda: self.set_server_ip(self.default_server_ip))
+        QTimer.singleShot(100, self.send_config_request)
+        QTimer.singleShot(100, self.send_status_request)
 
         try:
             # Keyswitch setup
@@ -1050,9 +1077,22 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(on_err)
         self.thread_pool.start(worker)
 
+    @Slot()
     def flush_pending_points(self):
+        if not self._pending_points:
+            return
+        # Batch process all pending points at once
+        # Group by series to reduce redundant plot operations
+        series_data = {}
         for series, t, val in self._pending_points:
-            self.graphs.add_point(series, t, val)
+            if series not in series_data:
+                series_data[series] = []
+            series_data[series].append((t, val))
+
+        # Add all points for each series
+        for series, points in series_data.items():
+            self.graphs.add_point_batch(series, points)
+
         self._pending_points.clear()
 
     def toggle_log(self):
@@ -1279,9 +1319,9 @@ class MainWindow(QMainWindow):
         m = m.split("]", 1)[-1]  # strip any leading timestamp
         m = m.strip()
 
-        # Strict data-line matcher: "DEVICE <t> NAME:VAL" (no ANSI, one line)
+        # Match data with optional timestamp: "DEVICE [<t>] NAME: VAL" or "DEVICE <t> NAME:VAL"
         DATA_LOG_RE = re.compile(
-            r"^(?P<device>\S+)\s+(?P<t>[+-]?\d+(?:\.\d+)?)\s+(?P<name>[A-Za-z0-9_]+):(?P<val>[+-]?\d+(?:\.\d+)?)$"
+            r"^(?P<device>\S+)\s+(?:(?P<t>[+-]?\d+(?:\.\d+)?)\s+)?(?P<name>\S+):\s*(?P<val>[+-]?\d+(?:\.\d+)?)$"
         )
         CONTROL_LOG_RE = re.compile(
             r"^(?P<device>\S+)\s+CONTROL\s+(?P<control>\S+)\s+(?P<action>\S+)$"
@@ -1306,7 +1346,9 @@ class MainWindow(QMainWindow):
         # Process the incoming data string
         try:
             device = data.group("device")
-            t = float(data.group("t"))
+            t_str = data.group("t")
+            # Use current time if timestamp not provided
+            t = float(t_str) if t_str else time.time()
             name = data.group("name")
             val = float(data.group("val"))
         except Exception:
