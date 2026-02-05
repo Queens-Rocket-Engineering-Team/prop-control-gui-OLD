@@ -1077,6 +1077,30 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(on_err)
         self.thread_pool.start(worker)
 
+    def setButtonStatesFromConfig(self) -> None:
+        """Disable the button that corresponds to the default state, enable the other.
+        So you can only click buttons that change the state away from default."""
+        if not isinstance(self.deviceConfig, dict):
+            return
+
+        for devName, devDict in self.deviceConfig.get("configs", {}).items():
+            for control, controlDict in devDict.get("controls", {}).items():
+                control_upper = control.upper()
+                default_state = controlDict.get("defaultState", None)
+
+                if default_state == "OPEN":
+                    # Default is OPEN, so disable the OPEN button, enable CLOSE
+                    if f"{control_upper}_open" in self.controlButtons:
+                        self.controlButtons[f"{control_upper}_open"].setEnabled(False)
+                    if f"{control_upper}_close" in self.controlButtons:
+                        self.controlButtons[f"{control_upper}_close"].setEnabled(True)
+                elif default_state == "CLOSED":
+                    # Default is CLOSED, so disable the CLOSE button, enable OPEN
+                    if f"{control_upper}_close" in self.controlButtons:
+                        self.controlButtons[f"{control_upper}_close"].setEnabled(False)
+                    if f"{control_upper}_open" in self.controlButtons:
+                        self.controlButtons[f"{control_upper}_open"].setEnabled(True)
+
     @Slot()
     def flush_pending_points(self):
         if not self._pending_points:
@@ -1135,8 +1159,8 @@ class MainWindow(QMainWindow):
             else:
                 self.deviceConfig = payload
 
-            # WE NO LONGER SET TO DEFAULT ON BOOT. Button states are set by status requests using send_status_request()
-            # self.setControlButtonsToDefault()
+            # Set button states based on default states from config
+            self.setButtonStatesFromConfig()
             # Apply any units from the config to graph titles/readouts
             self.apply_units_from_config()
 
@@ -1332,15 +1356,18 @@ class MainWindow(QMainWindow):
         dataMatch = DATA_LOG_RE.match(m)
         if dataMatch:
             self.handleDataString(dataMatch)
+            return
+
         controlMatch = CONTROL_LOG_RE.match(m)
         if controlMatch:
+            self.append_log(f"[DEBUG] Control match: {m}")
             self.handleControlString(controlMatch)
+            return
+
         statusMatch = STATUS_LOG_RE.match(m)
         if statusMatch:
             self.handleStatusString(statusMatch)
-
-        if not dataMatch:
-            return  # ignore non-data lines
+            return
 
     def handleDataString(self, data: re.Match) -> None:
         # Process the incoming data string
@@ -1367,15 +1394,26 @@ class MainWindow(QMainWindow):
     def handleControlString(self, data: re.Match) -> None:
         # device not used here, but parsed for completeness
         _device = data.group("device")
-        control = data.group("control")
-        action = data.group("action")
+        control = data.group("control").upper()
+        action = data.group("action").upper()
 
-        if action == "opened":
-            self.controlButtons[f"{control}_open"].setEnabled(False)
-            self.controlButtons[f"{control}_close"].setEnabled(True)
-        if action == "closed":
-            self.controlButtons[f"{control}_close"].setEnabled(False)
-            self.controlButtons[f"{control}_open"].setEnabled(True)
+        self.append_log(
+            f"[DEBUG] handleControlString: control={control}, action={action}"
+        )
+
+        # Handle both "OPEN"/"OPENED" and "CLOSE"/"CLOSED"
+        if action in ("OPEN", "OPENED"):
+            self.append_log(f"[DEBUG] Setting {control} to OPEN state")
+            if f"{control}_open" in self.controlButtons:
+                self.controlButtons[f"{control}_open"].setEnabled(False)
+            if f"{control}_close" in self.controlButtons:
+                self.controlButtons[f"{control}_close"].setEnabled(True)
+        elif action in ("CLOSE", "CLOSED"):
+            self.append_log(f"[DEBUG] Setting {control} to CLOSED state")
+            if f"{control}_close" in self.controlButtons:
+                self.controlButtons[f"{control}_close"].setEnabled(False)
+            if f"{control}_open" in self.controlButtons:
+                self.controlButtons[f"{control}_open"].setEnabled(True)
 
     def handleStatusString(self, data: re.Match) -> None:
         # device not used here, but parsed for completeness
@@ -1384,14 +1422,18 @@ class MainWindow(QMainWindow):
 
         ctlStatusDict = json.loads(status).get("controls", {})
 
-        for control, status in ctlStatusDict.items():
+        for control, state in ctlStatusDict.items():
             control = control.upper()
-            if status == "OPEN":
-                self.controlButtons[f"{control}_open"].setEnabled(False)
-                self.controlButtons[f"{control}_close"].setEnabled(True)
-            elif status == "CLOSED":
-                self.controlButtons[f"{control}_close"].setEnabled(False)
-                self.controlButtons[f"{control}_open"].setEnabled(True)
+            if state == "OPEN":
+                if f"{control}_open" in self.controlButtons:
+                    self.controlButtons[f"{control}_open"].setEnabled(False)
+                if f"{control}_close" in self.controlButtons:
+                    self.controlButtons[f"{control}_close"].setEnabled(True)
+            elif state == "CLOSED":
+                if f"{control}_close" in self.controlButtons:
+                    self.controlButtons[f"{control}_close"].setEnabled(False)
+                if f"{control}_open" in self.controlButtons:
+                    self.controlButtons[f"{control}_open"].setEnabled(True)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
