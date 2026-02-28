@@ -312,29 +312,20 @@ class ControlsSidebar(QGroupBox):
     ) -> None:
         super().__init__("Controls", parent)
         if controls is None:
-            av_controls = [
-                "AVFILL",
-                "AVRUN",
-                "AVDUMP",
-                "AVPURGE1",
-                "AVPURGE2",
-                "AVVENT",
-            ]
-            power_controls = ["SAFE24", "IGN"]
-        else:
-            # If custom controls are provided, split them by name
-            av_controls = [c for c in controls if c.startswith("AV")]
-            power_controls = [c for c in controls if c in {"SAFE24", "IGN"}]
+            controls = []
+
+        av_controls = [c for c in controls if c.startswith("AV")]
+        power_controls = [c for c in controls if c in {"SAFE24", "IGN"}]
+        other_controls = [
+            c for c in controls if not c.startswith("AV") and c not in {"SAFE24", "IGN"}
+        ]
 
         self.controlButtons: dict[str, QPushButton] = {}
 
         v = QVBoxLayout(self)
 
-        # Valves subbox
-        valves_box = QGroupBox("VALVES", self)
-        valves_layout = QVBoxLayout(valves_box)
-        for name in av_controls:
-            box = QGroupBox(name, valves_box)
+        def _make_control_box(name: str, parent_widget: QWidget) -> QGroupBox:
+            box = QGroupBox(name, parent_widget)
             h = QHBoxLayout(box)
             btn_open = QPushButton("Open", box)
             btn_close = QPushButton("Close", box)
@@ -349,7 +340,13 @@ class ControlsSidebar(QGroupBox):
             h.addWidget(btn_open)
             h.addWidget(btn_close)
             box.setLayout(h)
-            valves_layout.addWidget(box)
+            return box
+
+        # Valves subbox
+        valves_box = QGroupBox("VALVES", self)
+        valves_layout = QVBoxLayout(valves_box)
+        for name in av_controls:
+            valves_layout.addWidget(_make_control_box(name, valves_box))
 
         # Add "Close All" and "Default Positions" buttons
         self.btn_close_all = QPushButton("Close All", valves_box)
@@ -371,25 +368,20 @@ class ControlsSidebar(QGroupBox):
         power_box = QGroupBox("Power", self)
         power_layout = QVBoxLayout(power_box)
         for name in power_controls:
-            box = QGroupBox(name, power_box)
-            h = QHBoxLayout(box)
-            btn_open = QPushButton("Open", box)
-            btn_close = QPushButton("Close", box)
-            self.controlButtons[f"{name}_open"] = btn_open
-            self.controlButtons[f"{name}_close"] = btn_close
-            btn_open.clicked.connect(
-                lambda _=False, n=name: self.controlRequested.emit(n, "OPEN")
-            )
-            btn_close.clicked.connect(
-                lambda _=False, n=name: self.controlRequested.emit(n, "CLOSE")
-            )
-            h.addWidget(btn_open)
-            h.addWidget(btn_close)
-            box.setLayout(h)
-            power_layout.addWidget(box)
+            power_layout.addWidget(_make_control_box(name, power_box))
         power_layout.addStretch(1)
         power_box.setLayout(power_layout)
         v.addWidget(power_box)
+
+        # Other controls subbox (controls from config that don't fit AV or Power)
+        if other_controls:
+            other_box = QGroupBox("Other", self)
+            other_layout = QVBoxLayout(other_box)
+            for name in other_controls:
+                other_layout.addWidget(_make_control_box(name, other_box))
+            other_layout.addStretch(1)
+            other_box.setLayout(other_layout)
+            v.addWidget(other_box)
 
         # Spacer so the General group stays at the bottom
         v.addStretch(1)
@@ -923,12 +915,13 @@ class MainWindow(QMainWindow):
 
         # Left side: controls sidebar + (optional) config panel
         side = QWidget()
-        side_v = QVBoxLayout(side)
+        self._side_v = QVBoxLayout(side)
+        # Start with an empty sidebar; rebuilt dynamically from server config
         self.controls_sidebar = ControlsSidebar(general_widget=self.controls_panel)
         self.controlButtons = self.controls_sidebar.controlButtons
         self.controls_sidebar.controlRequested.connect(self.send_control_command)
-        side_v.addWidget(self.controls_sidebar)
-        side_v.addStretch(1)
+        self._side_v.addWidget(self.controls_sidebar)
+        self._side_v.addStretch(1)
         side.setMinimumWidth(220)
         side.setMaximumWidth(220)
 
@@ -968,34 +961,11 @@ class MainWindow(QMainWindow):
 
     def handleKeySwitch(self, status: int):
         self.append_log(f"Keyswitch changed to {status} position")
-        for buttonName in self.controlButtons:
-            self.append_log(f"checking {buttonName}")
-            if buttonName in [
-                "SAFE24_open",
-                "SAFE24_close",
-                "IGN_open",
-                "IGN_close",
-                "AVFILL_open",
-                "AVFILL_close",
-                "AVRUN_open",
-                "AVRUN_close",
-            ]:
-                if status == 1:
-                    self.append_log(f"Enabling {buttonName}")
-                    self.controlButtons[f"{buttonName}"].setEnabled(True)
-                    self.controlButtons[f"{buttonName}"].setEnabled(True)
-                else:
-                    self.append_log(f"Disabling {buttonName}")
-                    self.controlButtons[f"{buttonName}"].setEnabled(False)
-                    self.controlButtons[f"{buttonName}"].setEnabled(False)
-
-        if status == 0:
-            self.controls_sidebar.btn_close_all.setEnabled(False)
-            self.controls_sidebar.btn_default_positions.setEnabled(False)
-
-        elif status == 1:
-            self.controls_sidebar.btn_close_all.setEnabled(True)
-            self.controls_sidebar.btn_default_positions.setEnabled(True)
+        enabled = status == 1
+        for button in self.controlButtons.values():
+            button.setEnabled(enabled)
+        self.controls_sidebar.btn_close_all.setEnabled(enabled)
+        self.controls_sidebar.btn_default_positions.setEnabled(enabled)
 
     def _collect_sensor_columns(self) -> list[str]:
         """Collect sensor names from deviceConfig for CSV header order.
@@ -1150,14 +1120,58 @@ class MainWindow(QMainWindow):
                     self.controlButtons[f"{control}_open"].setEnabled(True)
                     self.controlButtons[f"{control}_close"].setEnabled(False)
 
+    def _extract_controls_from_config(self) -> list[str]:
+        """Return all unique control names (uppercased) from the device config."""
+        seen: set[str] = set()
+        controls: list[str] = []
+        if not isinstance(self.deviceConfig, dict):
+            return controls
+        for devDict in self.deviceConfig.get("configs", {}).values():
+            if not isinstance(devDict, dict):
+                continue
+            for ctrl in devDict.get("controls", {}).keys():
+                name = ctrl.upper()
+                if name not in seen:
+                    seen.add(name)
+                    controls.append(name)
+        return controls
+
+    def _rebuild_controls_sidebar(self, controls: list[str]) -> None:
+        """Replace the controls sidebar with one built from the given control names."""
+        # Detach controls_panel from the old sidebar before destroying it
+        self.controls_panel.setParent(None)
+
+        old = self.controls_sidebar
+        self._side_v.removeWidget(old)
+        old.setParent(None)
+        old.deleteLater()
+
+        self.controls_sidebar = ControlsSidebar(
+            general_widget=self.controls_panel,
+            controls=controls,
+        )
+        self.controlButtons = self.controls_sidebar.controlButtons
+        self.controls_sidebar.controlRequested.connect(self.send_control_command)
+        # Insert before the trailing stretch (index 0)
+        self._side_v.insertWidget(0, self.controls_sidebar)
+
+        # Reapply key switch state if the monitor is running
+        ks = getattr(self, "keySwitchMonitor", None)
+        if ks is not None and ks.status is not None:
+            self.handleKeySwitch(ks.status)
+
     def handleConfigResponse(self, payload: dict) -> None:
         self.append_log(f"Config response: {payload}")
-        # Stash config locally as dict
         try:
             if isinstance(payload, str):
                 self.deviceConfig = json.loads(payload)
             else:
                 self.deviceConfig = payload
+
+            # Rebuild the sidebar from whatever controls the server declares
+            controls = self._extract_controls_from_config()
+            self.append_log(f"Controls from config: {controls}")
+            self._rebuild_controls_sidebar(controls)
 
             # Set button states based on default states from config
             self.setButtonStatesFromConfig()
